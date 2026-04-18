@@ -25,7 +25,6 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
         pass
     return os.getenv(key, default)
 
-
 COMPANIES_HOUSE_API_KEY = (get_secret("COMPANIES_HOUSE_API_KEY", "") or "").strip()
 SUPABASE_DB_URL = (get_secret("SUPABASE_DB_URL", "") or "").strip()
 ADMIN_ACCESS_TOKEN = (get_secret("ADMIN_ACCESS_TOKEN", "") or "").strip()
@@ -44,7 +43,7 @@ BASE_URL = "https://api.company-information.service.gov.uk"
 # PAGE SETUP
 # =========================================================
 st.set_page_config(
-    page_title="UK Investment Companies Lookup",
+    page_title="Sourcing Companies Investment",
     page_icon="🏢",
     layout="wide",
 )
@@ -1580,10 +1579,9 @@ def render_hero():
     st.markdown(
         """
         <div class="hero">
-            <h1>UK Investment Companies Lookup</h1>
+            <h1>Sourcing Companies Investment</h1>
             <p>
-                Search companies from GOV.UK Companies House, cache results into Supabase,
-                and review company profile, officers, and a simple investment suitability score.
+                Search companies from GOV.UK Companies House, and review company profile, officers, and a simple investment suitability score.
             </p>
         </div>
         """,
@@ -1591,20 +1589,20 @@ def render_hero():
     )
 
 
-def render_sidebar():
-    with st.sidebar:
-        st.markdown("### App Settings")
-        st.write(f"Search TTL: **{CACHE_TTL_SEARCH_HOURS}h**")
-        st.write(f"Company TTL: **{CACHE_TTL_COMPANY_HOURS}h**")
-        st.write(f"Officers TTL: **{CACHE_TTL_OFFICERS_HOURS}h**")
-        st.write(f"Search result limit: **{SEARCH_RESULT_LIMIT}**")
-        st.write(f"API cap used: **{API_MAX_REQUESTS_PER_5_MIN} / 5 min**")
-        st.write(f"Admin batch size: **{ADMIN_BATCH_SIZE}**")
-        st.markdown("---")
-        st.caption(
-            "Data is written when users search or when admin uploads CSV. "
-            "If cache is fresh, the app reads from Supabase instead of hitting the API."
-        )
+# def render_sidebar():
+#     with st.sidebar:
+#         st.markdown("### App Settings")
+#         st.write(f"Search TTL: **{CACHE_TTL_SEARCH_HOURS}h**")
+#         st.write(f"Company TTL: **{CACHE_TTL_COMPANY_HOURS}h**")
+#         st.write(f"Officers TTL: **{CACHE_TTL_OFFICERS_HOURS}h**")
+#         st.write(f"Search result limit: **{SEARCH_RESULT_LIMIT}**")
+#         st.write(f"API cap used: **{API_MAX_REQUESTS_PER_5_MIN} / 5 min**")
+#         st.write(f"Admin batch size: **{ADMIN_BATCH_SIZE}**")
+#         st.markdown("---")
+#         st.caption(
+#             "Data is written when users search or when admin uploads CSV. "
+#             "If cache is fresh, the app reads from Supabase instead of hitting the API."
+#         )
 
 
 def render_profile(profile: Dict[str, Any]):
@@ -1716,9 +1714,9 @@ def render_score(score: int, reasons: List[str]):
 # =========================================================
 def render_browse_page():
     render_hero()
-    render_sidebar()
+    # render_sidebar()
 
-    st.markdown("## Browse Cached Companies")
+    st.markdown("## Companies")
     st.caption(
         "Browse all companies previously fetched and cached in the database. "
         "Filter by region and/or SIC section to narrow the results."
@@ -1811,7 +1809,7 @@ def render_browse_page():
 # =========================================================
 def render_main_page():
     render_hero()
-    render_sidebar()
+    # render_sidebar()
 
     col1, col2 = st.columns([2.2, 1])
     with col1:
@@ -1854,7 +1852,7 @@ def render_main_page():
     results_df = st.session_state.results_df
 
     if results_df.empty:
-        st.info("Search by keyword first. Data is written into Supabase when users search.")
+        st.info("Search by keyword first.")
         return
 
     # Build enriched dataframe with region + section from fetched profiles
@@ -1958,6 +1956,150 @@ def render_main_page():
         st.json(profile)
 
 
+
+def _render_browse_section():
+    """Browse section – always visible on main page, fully server-side filtered + paginated."""
+    st.markdown("---")
+    st.markdown("## Companies")
+    st.caption(
+        "If you are not able to find the company you are looking for, try to search by keyword first. "
+    )
+
+    PAGE_SIZE = 100
+
+    all_regions  = get_all_regions()
+    all_sections = get_all_sections()
+
+    # ── Filter row
+    bf1, bf2, bf3, bf4 = st.columns([1.2, 1.2, 1.2, 0.8])
+    with bf1:
+        selected_regions = st.multiselect(
+            "Region", all_regions, placeholder="All regions", key="b_region"
+        )
+    with bf2:
+        selected_sections = st.multiselect(
+            "Section", all_sections, placeholder="All sections", key="b_section"
+        )
+    with bf3:
+        selected_status = st.multiselect(
+            "Status",
+            ["active", "dissolved", "liquidation", "administration",
+             "voluntary-arrangement", "converted-closed"],
+            placeholder="All statuses",
+            key="b_status",
+        )
+    with bf4:
+        search_name = st.text_input("Search name", placeholder="e.g. tesla", key="b_name")
+
+    # ── Build WHERE conditions (server-side)
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    if selected_regions:
+        ph = ",".join(["%s"] * len(selected_regions))
+        conditions.append(f"region in ({ph})")
+        params.extend(selected_regions)
+
+    if selected_sections:
+        ph = ",".join(["%s"] * len(selected_sections))
+        conditions.append(f"section_type in ({ph})")
+        params.extend(selected_sections)
+
+    if selected_status:
+        ph = ",".join(["%s"] * len(selected_status))
+        conditions.append(f"company_status in ({ph})")
+        params.extend(selected_status)
+
+    if search_name.strip():
+        conditions.append("lower(title) like %s")
+        params.append(f"%{search_name.strip().lower()}%")
+
+    where_clause = "where " + " and ".join(conditions) if conditions else ""
+
+    # ── Total count (for pagination display)
+    count_row = db_fetchone(
+        f"select count(*) from public.companies {where_clause}",
+        tuple(params)
+    )
+    total_count = count_row[0] if count_row else 0
+
+    import math
+    total_pages = max(1, math.ceil(total_count / PAGE_SIZE))
+
+    # ── Pagination controls
+    pg_col1, pg_col2, pg_col3 = st.columns([2, 1, 2])
+    with pg_col2:
+        page_num = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key="b_page",
+        )
+
+    offset = (int(page_num) - 1) * PAGE_SIZE
+
+    pg_col1.markdown(
+        f"<div style='padding-top:1.6rem; color:#64748b; font-size:0.9rem;'>"
+        f"<b>{total_count:,}</b> companies found</div>",
+        unsafe_allow_html=True,
+    )
+    pg_col3.markdown(
+        f"<div style='padding-top:1.6rem; text-align:right; color:#64748b; font-size:0.9rem;'>"
+        f"Page <b>{int(page_num)}</b> of <b>{total_pages}</b> "
+        f"&nbsp;({PAGE_SIZE} rows/page)</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Fetch exactly one page (LIMIT + OFFSET)
+    rows = db_fetchall(
+        f"""
+        select
+            company_number,
+            title,
+            company_status,
+            company_type,
+            date_of_creation,
+            address_snippet,
+            region,
+            sic_code,
+            section_type
+        from public.companies
+        {where_clause}
+        order by title asc
+        limit %s offset %s
+        """,
+        tuple(params) + (PAGE_SIZE, offset)
+    )
+
+    if not rows:
+        st.info("No companies found. Adjust filters or search first to populate the database.")
+        return
+
+    df = pd.DataFrame(rows, columns=[
+        "company_number", "title", "company_status", "company_type",
+        "date_of_creation", "address_snippet", "region", "sic_code", "section_type"
+    ])
+    df["date_of_creation"] = df["date_of_creation"].astype(str)
+
+    st.dataframe(
+        df.rename(columns={
+            "company_number": "Company #",
+            "title": "Name",
+            "company_status": "Status",
+            "company_type": "Type",
+            "date_of_creation": "Created",
+            "address_snippet": "Address",
+            "region": "Region",
+            "sic_code": "SIC Code",
+            "section_type": "Section",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 # =========================================================
 # HIDDEN ADMIN PAGE
 # =========================================================
@@ -1973,6 +2115,87 @@ def render_admin_page():
     )
 
     ensure_bulk_job_tables()
+
+    # ── Backfill Region & SIC ─────────────────────────────────────────────────
+    st.markdown("## Backfill Region & SIC Code")
+    st.caption(
+        "Update companies that already exist in the database but are still missing `region` or `sic_code`. "
+        "The app will re-fetch their profile from the Companies House API and update only the missing fields. "
+        "No data is deleted — safe to run at any time."
+    )
+
+    missing_count_row = db_fetchone(
+        "select count(*) from public.companies where region is null or sic_code is null"
+    )
+    missing_count = missing_count_row[0] if missing_count_row else 0
+    st.info(f"**{missing_count}** companies currently have missing `region` or `sic_code`.")
+
+    bf_col1, bf_col2 = st.columns([1, 1])
+    backfill_limit = bf_col1.number_input(
+        "Max companies to backfill per run",
+        min_value=10,
+        max_value=5000,
+        value=500,
+        step=50,
+        help="Set lower to be safe with API rate limits. You can run multiple times.",
+    )
+    backfill_only_null_region = bf_col2.checkbox(
+        "Only companies with NULL region (skip SIC-only missing)", value=False
+    )
+
+    if st.button("🔄 Start Backfill", type="primary", use_container_width=True):
+        if missing_count == 0:
+            st.success("Nothing to backfill – all companies already have region and SIC code!")
+        else:
+            if backfill_only_null_region:
+                missing_rows = db_fetchall(
+                    "select company_number from public.companies where region is null limit %s",
+                    (int(backfill_limit),)
+                )
+            else:
+                missing_rows = db_fetchall(
+                    "select company_number from public.companies where region is null or sic_code is null limit %s",
+                    (int(backfill_limit),)
+                )
+
+            company_numbers = [r[0] for r in missing_rows]
+            total_bf = len(company_numbers)
+            st.write(f"Fetching profiles for **{total_bf}** companies...")
+
+            bf_progress = st.progress(0)
+            bf_status = st.empty()
+            bf_ok, bf_fail = 0, 0
+
+            for i, cn in enumerate(company_numbers, start=1):
+                try:
+                    # Force fresh fetch by nulling the last_fetched timestamp first
+                    db_execute(
+                        "update public.companies set last_profile_fetched_at = null where company_number = %s",
+                        (cn,)
+                    )
+                    profile = fetch_company_profile_api(cn)
+                    upsert_company_profile(cn, profile)
+                    bf_ok += 1
+                except Exception as ex:
+                    bf_fail += 1
+                    # Continue – don't abort the whole batch on one failure
+                finally:
+                    bf_progress.progress(min(i / total_bf, 1.0))
+                    bf_status.info(
+                        f"Backfill progress: {i}/{total_bf} • "
+                        f"updated: {bf_ok} • failed: {bf_fail}"
+                    )
+
+            bf_progress.progress(1.0)
+            bf_status.success(
+                f"Backfill done! {bf_ok} companies updated, {bf_fail} failed. "
+                f"Run again if more remain."
+            )
+            # Invalidate the cached region/section lists
+            get_all_regions.clear()
+            get_all_sections.clear()
+
+    st.markdown("---")
 
     # SIC Code Seeding
     st.markdown("## Seed SIC Code Lookup Table")
@@ -2127,22 +2350,8 @@ def main():
         render_admin_page()
         return
 
-    if page == "browse":
-        render_browse_page()
-        return
-
-    # Navigation tabs at the top of main page
-    nav_col1, nav_col2, _ = st.columns([1, 1, 4])
-    with nav_col1:
-        if st.button("🔍 Search", use_container_width=True):
-            st.query_params.update({"page": "home"})
-            st.rerun()
-    with nav_col2:
-        if st.button("📋 Browse Database", use_container_width=True):
-            st.query_params.update({"page": "browse"})
-            st.rerun()
-
     render_main_page()
+    _render_browse_section()
 
 
 main()
